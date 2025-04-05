@@ -32,6 +32,8 @@
 #include <signal.h>
 
 static volatile int global_sock = -1;
+const char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
+const char *not_implemented = "HTTP/1.1 501 Not Implemented\r\n\r\n";
 #define BUF_SIZE 4096
 #define ECHO_PORT 9999
 #define MAX_CLIENTS 1024  // 最大客户端数量
@@ -188,11 +190,19 @@ int main() {
 					if (!request_end) {
 						// 请求不完整时保持读取
 						if (client->buf_len == BUF_SIZE) { // 缓冲区已满仍无完整头
-							const char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
-							send(fd, bad_request, strlen(bad_request), 0);
-							close_client(epoll_fd, clients, fd_to_index, fd);
-							clients[idx].fd = -1;
-							current_clients--;
+							size_t resp_len = strlen(bad_request);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, bad_request, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
 						}
 						continue;
 					}
@@ -201,12 +211,19 @@ int main() {
 					char *method_start = client->buf;
 					char *method_end = strchr(method_start, ' ');
 					if (!method_end) {
-						const char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
-						send(fd, bad_request, strlen(bad_request), 0);
-						close_client(epoll_fd, clients, fd_to_index, fd);
-						clients[idx].fd = -1;
-						current_clients--;
-						continue;
+						size_t resp_len = strlen(bad_request);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, bad_request, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
 					}
 			
 					// 提取方法（安全拷贝）
@@ -219,23 +236,37 @@ int main() {
 						strcmp(method, "HEAD") != 0 && 
 						strcmp(method, "POST") != 0) 
 					{
-						const char *not_implemented = "HTTP/1.1 501 Not Implemented\r\n\r\n";
-						send(fd, not_implemented, strlen(not_implemented), 0);
-						close_client(epoll_fd, clients, fd_to_index, fd);
-						clients[idx].fd = -1;
-						current_clients--;
-						continue;
+						size_t resp_len = strlen(not_implemented);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, not_implemented, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
 					}
 			
 					// 严格协议版本检查
 					char *proto_start = strstr(client->buf, "HTTP/1.");
 					if (!proto_start || (proto_start - client->buf) > 128) { // 协议字段位置异常
-						const char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
-						send(fd, bad_request, strlen(bad_request), 0);
-						close_client(epoll_fd, clients, fd_to_index, fd);
-						clients[idx].fd = -1;
-						current_clients--;
-						continue;
+						size_t resp_len = strlen(bad_request);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, bad_request, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
 					}
 			
 					/* 构造ECHO响应 */
@@ -249,18 +280,27 @@ int main() {
 			
 					// 缓冲区安全检查
 					if ((size_t)header_len + req_total_len > BUF_SIZE) {
-						const char *server_error = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
-						send(fd, server_error, strlen(server_error), 0);
-						close_client(epoll_fd, clients, fd_to_index, fd);
-						clients[idx].fd = -1;
-						current_clients--;
-						continue;
+						const char *server_error = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnect: close\r\n\r\n";
+						size_t resp_len = strlen(server_error);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, server_error, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
 					}
 			
-					// 移动原始请求数据
+					// 移动原始请求数据(请求头)
 					memmove(client->buf + header_len, client->buf, req_total_len);
 					// 添加响应头
 					memcpy(client->buf, header, header_len);
+					// 更新缓冲区长度
 					client->buf_len = header_len + req_total_len;
 			
 					// 切换为写模式
