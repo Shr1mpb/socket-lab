@@ -1,4 +1,5 @@
-/******************************************************************************
+/*
+*​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​
 * echo_server.c                                                               *
 *                                                                             *
 * Description: This file contains the C source code for an echo server.  The  *
@@ -9,12 +10,13 @@
 * Authors: Athula Balachandran <abalacha@cs.cmu.edu>,                         *
 *          Wolf Richter <wolf@cs.cmu.edu>                                     *
 *                                                                             *
-*******************************************************************************/
+​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**​​**
+​*/
 
 /*
-	使用epoll I/O多路复用 事件驱动型单线程WebServer
-	模仿redis的单线程设计
-	fd_to_index是为了防止fd过大导致的Client数组越界
+    使用epoll I/O多路复用 事件驱动型单线程WebServer
+    模仿redis的单线程设计
+    fd_to_index是为了防止fd过大导致的Client数组越界
 */
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -27,7 +29,9 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <signal.h>
 
+static volatile int global_sock = -1;
 #define BUF_SIZE 4096
 #define ECHO_PORT 9999
 #define MAX_CLIENTS 1024  // 最大客户端数量
@@ -62,7 +66,19 @@ void close_client(int epoll_fd, Client *clients, int *fd_to_index, int fd) {
     }
 }
 
+// 处理信号 在关闭时输出日志
+void handle_signal(int sig) {
+    printf("\nClosing server socket...byebye\n");
+    if (global_sock != -1) {
+        close(global_sock);
+    }
+    exit(EXIT_SUCCESS);
+}
+
 int main() {
+	// 注册信号处理器 回调handle_signal关闭socket
+	signal(SIGINT, handle_signal); // 处理CTRL+C产生的信号 
+    signal(SIGTERM, handle_signal);// 处理KILL产生的信号 
     int sock, epoll_fd;
     struct sockaddr_in addr;
     struct epoll_event ev, events[MAX_EVENTS];
@@ -80,6 +96,10 @@ int main() {
 
     // 初始化TCP套接字
     sock = socket(AF_INET, SOCK_STREAM, 0);
+	global_sock = sock;  // 将套接字保存到全局变量 处理信号时使用
+	// 允许端口复用 避免TCP一直占用端口重启后监听失败
+	int reuse = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     set_nonblocking(sock);
 
     addr.sin_family = AF_INET;
@@ -148,30 +168,112 @@ int main() {
                 printf("New client: %s:%d (fd=%d)\n", client->ipstr, client->port, client_sock);
 
                 // 监听可读事件
-                ev.events = EPOLLIN | EPOLLET;
+                ev.events = EPOLLIN;
                 ev.data.fd = client_sock;
                 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_sock, &ev);
             }
             // 客户端可读事件
             else if (events[i].events & EPOLLIN) {
-                int idx = fd_to_index[fd];
-                if (idx == -1 || idx >= MAX_CLIENTS) continue;
-                
-                Client *client = &clients[idx];
-                ssize_t readret = recv(fd, client->buf + client->buf_len, BUF_SIZE - client->buf_len, 0);
+				int idx = fd_to_index[fd];
+				if (idx == -1 || idx >= MAX_CLIENTS) continue;
+				
+				Client *client = &clients[idx];
+				ssize_t readret = recv(fd, client->buf + client->buf_len, BUF_SIZE - client->buf_len, 0);
+			
+				if (readret > 0) {
+					client->buf_len += readret;
+					client->buf[client->buf_len] = '\0'; // 确保字符串终止
 
-                if (readret > 0) {
-                    client->buf_len += readret;
-                    ev.events = EPOLLOUT | EPOLLET;
-                    ev.data.fd = fd;
-                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
-                }
-                else if (readret <= 0 && errno != EAGAIN) {
-                    close_client(epoll_fd, clients, fd_to_index, fd);
-                    clients[idx].fd = -1; // 标记为可用
-                    current_clients--;
-                }
-            }
+					char *request_end = strstr(client->buf, "\r\n\r\n"); // 检测完整HTTP头
+					if (!request_end) {
+						// 请求不完整时保持读取
+						if (client->buf_len == BUF_SIZE) { // 缓冲区已满仍无完整头
+							const char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
+							send(fd, bad_request, strlen(bad_request), 0);
+							close_client(epoll_fd, clients, fd_to_index, fd);
+							clients[idx].fd = -1;
+							current_clients--;
+						}
+						continue;
+					}
+			
+					// 严格解析请求行
+					char *method_start = client->buf;
+					char *method_end = strchr(method_start, ' ');
+					if (!method_end) {
+						const char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
+						send(fd, bad_request, strlen(bad_request), 0);
+						close_client(epoll_fd, clients, fd_to_index, fd);
+						clients[idx].fd = -1;
+						current_clients--;
+						continue;
+					}
+			
+					// 提取方法（安全拷贝）
+					char method[16] = {0};
+					strncpy(method, method_start, method_end - method_start);
+					method[15] = '\0'; // 强制截断防止溢出
+			
+					// 方法验证
+					if (strcmp(method, "GET") != 0 && 
+						strcmp(method, "HEAD") != 0 && 
+						strcmp(method, "POST") != 0) 
+					{
+						const char *not_implemented = "HTTP/1.1 501 Not Implemented\r\n\r\n";
+						send(fd, not_implemented, strlen(not_implemented), 0);
+						close_client(epoll_fd, clients, fd_to_index, fd);
+						clients[idx].fd = -1;
+						current_clients--;
+						continue;
+					}
+			
+					// 严格协议版本检查
+					char *proto_start = strstr(client->buf, "HTTP/1.");
+					if (!proto_start || (proto_start - client->buf) > 128) { // 协议字段位置异常
+						const char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
+						send(fd, bad_request, strlen(bad_request), 0);
+						close_client(epoll_fd, clients, fd_to_index, fd);
+						clients[idx].fd = -1;
+						current_clients--;
+						continue;
+					}
+			
+					/* 构造ECHO响应 */
+					size_t req_total_len = request_end - client->buf + 4; // 包含\r\n\r\n
+					char header[128];
+					int header_len = snprintf(header, sizeof(header),
+						"HTTP/1.1 200 OK\r\n"
+						"Content-Length: %zd\r\n"
+						"Connection: close\r\n\r\n",  // 简化处理，每次关闭连接
+						req_total_len);
+			
+					// 缓冲区安全检查
+					if ((size_t)header_len + req_total_len > BUF_SIZE) {
+						const char *server_error = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+						send(fd, server_error, strlen(server_error), 0);
+						close_client(epoll_fd, clients, fd_to_index, fd);
+						clients[idx].fd = -1;
+						current_clients--;
+						continue;
+					}
+			
+					// 移动原始请求数据
+					memmove(client->buf + header_len, client->buf, req_total_len);
+					// 添加响应头
+					memcpy(client->buf, header, header_len);
+					client->buf_len = header_len + req_total_len;
+			
+					// 切换为写模式
+					ev.events = EPOLLOUT | EPOLLET;
+					ev.data.fd = fd;
+					epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+				}
+				else if (readret <= 0 && errno != EAGAIN) {
+					close_client(epoll_fd, clients, fd_to_index, fd);
+					clients[idx].fd = -1;
+					current_clients--;
+				}
+			}
             // 客户端可写事件
             else if (events[i].events & EPOLLOUT) {
                 int idx = fd_to_index[fd];
@@ -181,19 +283,20 @@ int main() {
                 ssize_t sent = send(fd, client->buf, client->buf_len, 0);
 
                 if (sent > 0) {
-                    if (sent < client->buf_len) {
+                    if (sent < client->buf_len) {// 没写完 继续监听可写事件
                         memmove(client->buf, client->buf + sent, client->buf_len - sent);
                         client->buf_len -= sent;
-                    } else {
+                    } else {// 写完了
                         client->buf_len = 0;
-                        ev.events = EPOLLIN | EPOLLET;
+                        // 恢复监听读事件
+                        ev.events = EPOLLIN;
                         ev.data.fd = fd;
                         epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
                     }
                 }
                 else if (sent == -1 && errno != EAGAIN) {
                     close_client(epoll_fd, clients, fd_to_index, fd);
-                    clients[idx].fd = -1; // 标记为可用
+                    clients[idx].fd = -1;
                     current_clients--;
                 }
             }
