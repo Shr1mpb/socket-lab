@@ -208,9 +208,60 @@ int main() {
 					}
 			
 					// 严格解析请求行
-					char *method_start = client->buf;
-					char *method_end = strchr(method_start, ' ');
-					if (!method_end) {
+					char *line_end = strstr(client->buf, "\r\n");
+					if (!line_end) {// 找不到请求行
+						size_t resp_len = strlen(bad_request);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, bad_request, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
+					}
+					// 截断协议并验证：这里先只验证 路径 和 协议
+					// ------------------------开始验证---------------------------------
+					*line_end = '\0';// 截断协议用于下面验证
+
+
+					// 分割请求行各部分
+					char *method_end0 = strchr(client->buf, ' ');
+					char *path_start0 = method_end0 ? method_end0 + 1 : NULL;
+					char *path_end0 = strchr(method_end0 ? method_end0 + 1 : client->buf, ' ');
+					char *proto_start0 = path_end0 ? path_end0 + 1 : NULL;
+
+					// 验证请求行基本结构
+					if (!method_end0 || !path_end0 || !proto_start0 || // 校验是否有空格分割的三个部分
+						(proto_start0 - client->buf) >= BUF_SIZE ||  // 防止越界
+						strcmp(proto_start0, "HTTP/1.1") != 0 || // 校验协议
+						strncmp(path_start0, "/", 1) != 0 // 校验路径以 / 开头
+					) {
+							size_t resp_len = strlen(bad_request);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, bad_request, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
+					}
+
+					*line_end = '\r';// 把截断的协议字符串复原
+					// ------------------------结束验证---------------------------------
+
+
+					// 方法截断并验证
+					if (!method_end0) {
 						size_t resp_len = strlen(bad_request);
 							// 将错误响应写入缓冲区
 							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
@@ -228,7 +279,7 @@ int main() {
 			
 					// 提取方法（安全拷贝）
 					char method[16] = {0};
-					strncpy(method, method_start, method_end - method_start);
+					strncpy(method, client->buf, method_end0 - client->buf);
 					method[15] = '\0'; // 强制截断防止溢出
 			
 					// 方法验证
@@ -252,7 +303,7 @@ int main() {
 					}
 			
 					// 严格协议版本检查
-					char *proto_start = strstr(client->buf, "HTTP/1.");
+					char *proto_start = strstr(client->buf, "HTTP/1.1");
 					if (!proto_start || (proto_start - client->buf) > 128) { // 协议字段位置异常
 						size_t resp_len = strlen(bad_request);
 							// 将错误响应写入缓冲区
