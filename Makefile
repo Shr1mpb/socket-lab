@@ -9,7 +9,7 @@ BIN := example echo_server echo_client
 # C compiler
 CC  := gcc
 # C PreProcessor Flag
-CPPFLAGS := -Iinclude
+CPPFLAGS := -Iinclude -I$(SRC_DIR)  # 添加对src目录的头文件搜索
 # compiler flags
 CFLAGS   := -g -Wall
 # DEPS = parse.h y.tab.h
@@ -31,7 +31,8 @@ $(SRC_DIR)/y.tab.c: $(SRC_DIR)/parser.y
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(OBJ_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-echo_server: $(OBJ_DIR)/echo_server.o
+# 添加server.o到echo_server的依赖
+echo_server: $(OBJ_DIR)/echo_server.o $(OBJ_DIR)/server.o
 	$(CC) -Werror $^ -o $@
 
 echo_client: $(OBJ_DIR)/echo_client.o
