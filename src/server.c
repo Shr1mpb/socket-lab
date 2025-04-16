@@ -1,12 +1,44 @@
 #include "server.h"
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 char *bad_request = "HTTP/1.1 400 Bad request\r\n\r\n";
 char *not_implemented = "HTTP/1.1 501 Not Implemented\r\n\r\n";
 
+// 第二周要添加的返回类型 400 404 501 505
+const char *not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
+const char *v_not_supported = "HTTP/1.1 505 HTTP Version not supported\r\n\r\n";
+
+// 500 Internal server error 处理内部错误
+const char *internal_error = "HTTP/1.1 500 Internal server error\r\n\r\n";
+
+// http的最长url
+const int PATH_MAX = 2083;
+// 文件根目录
+const char* ROOT_DIR = "/home/project-1/static_site";
 int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+// 获取请求头中的字符串信息
+char* get_header_value(const char *headers, const char *key) {
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\r\n%s: ", key);
+    
+    char *start = strstr(headers, search_key);
+    if (!start) return NULL;
+    
+    start += strlen(search_key);
+    char *end = strstr(start, "\r\n");
+    if (!end) return NULL;
+    
+    size_t len = end - start;
+    char *value = malloc(len + 1);
+    memcpy(value, start, len);
+    value[len] = '\0';
+    return value;
 }
 
 void close_client(int epoll_fd, Client *clients, int *fd_to_index, int fd) {
@@ -236,8 +268,29 @@ void handle_events(){
 
 					*line_end = '\r';// 把截断的协议字符串复原
 					// ------------------------结束验证---------------------------------
-
-
+					// 提取path:
+					// 提取路径
+					size_t path_len = path_end0 - path_start0;
+					char *path = malloc(path_len + 1);  // +1 为了结尾的\0
+					memcpy(path, path_start0, path_len);
+					path[path_len] = '\0';  // 结束
+					
+					// 验证路径合法性
+					if (strstr(path, "..")) {
+						size_t resp_len = strlen(bad_request);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, bad_request, resp_len);
+							client->buf_len = resp_len;
+							
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue; // 跳过后续处理
+					}
 					// 方法截断并验证
 					if (!method_end0) {
 						size_t resp_len = strlen(bad_request);
@@ -279,16 +332,25 @@ void handle_events(){
 							}
 							continue;  // 跳过后续处理
 					}
-			
+					
 					// 严格协议版本检查
 					char *proto_start = strstr(client->buf, "HTTP/1.1");
-					if (!proto_start || (proto_start - client->buf) > 128) { // 协议字段位置异常
-						size_t resp_len = strlen(bad_request);
+					char *proto_start1;
+					if (!proto_start || (proto_start - client->buf) > 128) {// 没找到 HTTP/1.1 子字符串 或者 超过128字节(请求行非法)
+						if (proto_start1 = strstr(client->buf, "HTTP/")){// 有HTTP/字段 说明协议版本不对
+							size_t resp_len = strlen(v_not_supported);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, v_not_supported, resp_len);
+							client->buf_len = resp_len;
+
+						}else{
+							size_t resp_len = strlen(bad_request);
 							// 将错误响应写入缓冲区
 							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
 							memcpy(client->buf, bad_request, resp_len);
 							client->buf_len = resp_len;
-							
+						}
 							// 切换为写事件
 							ev.events = EPOLLOUT;
 							ev.data.fd = fd;
@@ -297,25 +359,57 @@ void handle_events(){
 							}
 							continue;  // 跳过后续处理
 					}
+
+					// 读取请求头
+					char q_headers[BUF_SIZE];
+					int q_headers_len;
+					if (request_end) {
+						// 计算请求头长度（包含最后的 \r\n\r\n）
+						size_t headers_total_len = request_end - client->buf + 4;
+						
+						// 将头信息复制到专用缓冲区
+						memcpy(q_headers, client->buf, headers_total_len);
+						q_headers_len = headers_total_len;
+						q_headers[q_headers_len] = '\0';
+						
+						// 剩余数据是请求体（如果有）
+						size_t body_len = client->buf_len - headers_total_len;
+						memmove(client->buf, client->buf + headers_total_len, body_len);
+						client->buf_len = body_len;
+					}
+
+					char query_headers[4096]; // 获取请求头中的keep_alive部分
+					memcpy(query_headers, q_headers, q_headers_len + 1); // +1 复制终止符
+					size_t copy_len = MIN(q_headers_len, sizeof(query_headers)-1);
+					query_headers[copy_len] = '\0';
+					char *connection = get_header_value(query_headers, "Connection");
+					client->keep_alive = (connection && strcasecmp(connection, "keep-alive") == 0);
+					
+					// 构造响应
 			
-					/* 构造ECHO响应 */
-					size_t req_total_len = request_end - client->buf + 4; // 包含\r\n\r\n
-					char header[128];
-					int header_len = snprintf(header, sizeof(header),
-						"HTTP/1.1 200 OK\r\n"
-						"Content-Length: %zd\r\n"
-						"Connection: close\r\n\r\n",  // 简化处理，每次关闭连接
-						req_total_len);
-			
-					// 缓冲区安全检查
-					if ((size_t)header_len + req_total_len > BUF_SIZE) {
-						const char *server_error = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnect: close\r\n\r\n";
-						size_t resp_len = strlen(server_error);
+					// 处理GET/HEAD 
+					if (strcmp(method, "GET") == 0 || strcmp(method, "HEAD") == 0) {
+						// 获取文件元数据
+						struct stat st;
+						char full_path[PATH_MAX];
+						snprintf(full_path, sizeof(full_path), "/home/project-1/static_site/index.html"); // 这里偷懒直接硬编码了，不过在docker里也还可以吧 
+
+						if (strcmp(path, "/") == 0) {  
+							// 访问根目录，返回 index.html  
+							snprintf(full_path, sizeof(full_path), "%s/index.html", ROOT_DIR);  
+						} else {   
+							// 防止目录穿越攻击在之前读出path的时候已经做过
+							snprintf(full_path, sizeof(full_path), "%s%s", ROOT_DIR, path);  
+						}  
+
+						// 使用 stat 判断文件是否存在且是普通文件  
+						if (stat(full_path, &st) == -1 || !S_ISREG(st.st_mode)) {  
+							// 文件不存在，返回错误响应  
+							size_t resp_len = strlen(internal_error);
 							// 将错误响应写入缓冲区
 							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
-							memcpy(client->buf, server_error, resp_len);
+							memcpy(client->buf, internal_error, resp_len);
 							client->buf_len = resp_len;
-							
 							// 切换为写事件
 							ev.events = EPOLLOUT;
 							ev.data.fd = fd;
@@ -323,21 +417,144 @@ void handle_events(){
 								perror("epoll_ctl");
 							}
 							continue;  // 跳过后续处理
+						}  
+
+						// 打开文件
+						int file_fd = open(full_path, O_RDONLY);
+						if (file_fd == -1) {// 打开失败 返回错误
+							size_t resp_len = strlen(internal_error);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, internal_error, resp_len);
+							client->buf_len = resp_len;
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
+						}
+
+						
+						// 使用文件描述符获取状态
+						if (fstat(file_fd, &st) == -1) { // 获取失败
+							close(file_fd);
+							size_t resp_len = strlen(internal_error);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, internal_error, resp_len);
+							client->buf_len = resp_len;
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
+						}
+
+						// 动态构造响应头
+						char headers[512];
+						// const char *connection_header = client->keep_alive ? "keep-alive" : "close";
+						const char *connection_header =  "keep-alive";
+						int headers_len = snprintf(headers, sizeof(headers),
+							"HTTP/1.1 200 OK\r\n"
+							"Content-Length: %ld\r\n"
+							"Connection: %s\r\n\r\n",  // 动态设置
+							st.st_size,
+							connection_header);
+						// 处理缓冲区溢出
+						if (headers_len >= (int)sizeof(headers)) {
+							close(file_fd);
+							size_t resp_len = strlen(internal_error);
+							// 将错误响应写入缓冲区
+							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+							memcpy(client->buf, internal_error, resp_len);
+							client->buf_len = resp_len;
+							// 切换为写事件
+							ev.events = EPOLLOUT;
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl");
+							}
+							continue;  // 跳过后续处理
+						}
+						// 填充响应缓冲区
+						memcpy(client->buf, headers, headers_len);
+						client->buf_len = headers_len;
+
+						// GET方法需要发送文件内容（HEAD不发送）
+						if (strcmp(method, "GET") == 0) {
+							ssize_t bytes_read = read(file_fd, client->buf + headers_len, BUF_SIZE - headers_len);
+							if (bytes_read > 0) {
+								client->buf_len += bytes_read;
+							} else if (bytes_read == -1) {// 读取文件失败
+								size_t resp_len = strlen(internal_error);
+								// 将错误响应写入缓冲区
+								if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+								memcpy(client->buf, internal_error, resp_len);
+								client->buf_len = resp_len;
+								// 切换为写事件
+								ev.events = EPOLLOUT;
+								ev.data.fd = fd;
+								if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+									perror("epoll_ctl");
+								}
+								continue;  // 跳过后续处理
+							}
+						}
+
+						close(file_fd);
+						
+					}else{// 处理Post请求 直接echo回去
+						
+						
 					}
+			// // /* 
+			// 	//这里week1是echo响应 上面已改为正常处理请求
+			// 		// 构造ECHO响应
+			// 		size_t req_total_len = request_end - client->buf + 4; // 包含\r\n\r\n
+			// 		char header[128];
+			// 		int header_len = snprintf(header, sizeof(header),
+			// 			"HTTP/1.1 200 OK\r\n"
+			// 			"Content-Length: %zd\r\n"
+			// 			"Connection: close\r\n\r\n",  // 简化处理，每次关闭连接
+			// 			req_total_len);
 			
-					// 移动原始请求数据(请求头)
-					memmove(client->buf + header_len, client->buf, req_total_len);
-					// 添加响应头
-					memcpy(client->buf, header, header_len);
-					// 更新缓冲区长度
-					client->buf_len = header_len + req_total_len;
+			// 		// 缓冲区安全检查
+			// 		if ((size_t)header_len + req_total_len > BUF_SIZE) {
+			// 			const char *server_error = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnect: close\r\n\r\n";
+			// 			size_t resp_len = strlen(server_error);
+			// 				// 将错误响应写入缓冲区
+			// 				if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+			// 				memcpy(client->buf, server_error, resp_len);
+			// 				client->buf_len = resp_len;
+							
+			// 				// 切换为写事件
+			// 				ev.events = EPOLLOUT;
+			// 				ev.data.fd = fd;
+			// 				if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+			// 					perror("epoll_ctl");
+			// 				}
+			// 				continue;  // 跳过后续处理
+			// 		}
 			
+			// 		// 移动原始请求数据(请求头)
+			// 		memmove(client->buf + header_len, client->buf, req_total_len);
+			// 		// 添加响应头
+			// 		memcpy(client->buf, header, header_len);
+			// 		// 更新缓冲区长度
+			// 		client->buf_len = header_len + req_total_len;
+			// // */
+
+					free(path); // 释放路径内存
 					// 切换为写模式
 					ev.events = EPOLLOUT | EPOLLET;
 					ev.data.fd = fd;
 					epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
 				}
-				else if (readret <= 0 && errno != EAGAIN) {
+				else if (readret <= 0 && errno != EAGAIN) { // 没有能读到的了 关闭连接
 					close_client(epoll_fd, clients, fd_to_index, fd);
 					clients[idx].fd = -1;
 					current_clients--;
@@ -364,9 +581,15 @@ void handle_events(){
                     }
                 }
                 else if (sent == -1 && errno != EAGAIN) {
-                    close_client(epoll_fd, clients, fd_to_index, fd);
-                    clients[idx].fd = -1;
-                    current_clients--;
+					// 根据keep-alive决定是否关闭连接
+					if (!client->keep_alive) {
+						close_client(epoll_fd, clients, fd_to_index, fd);
+					} else {
+						// 重置缓冲区准备接收新请求
+						client->buf_len = 0;
+						ev.events = EPOLLIN;
+						epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+					}
                 }
             }
         }
