@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <sys/stat.h>  // 定义 struct stat
 #include <unistd.h>    // 提供 fstat() 等系统调用
+#include <time.h>
 
 #define BUF_SIZE 4096 // 缓冲区大小
 #define ECHO_PORT 9999 // 服务器监听的端口

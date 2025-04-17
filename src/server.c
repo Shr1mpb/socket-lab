@@ -21,6 +21,44 @@ int set_nonblocking(int fd) {
     if (flags == -1) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
+// 获取文件扩展名并确定MIME类型
+const char* get_mime_type(const char *filename) {
+    const char *dot = strrchr(filename, '.');
+    if (!dot) return "application/octet-stream";
+    
+    if (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0) return "text/html";
+    if (strcmp(dot, ".txt") == 0) return "text/plain";
+    if (strcmp(dot, ".css") == 0) return "text/css";
+    if (strcmp(dot, ".js") == 0) return "application/javascript";
+    if (strcmp(dot, ".json") == 0) return "application/json";
+    if (strcmp(dot, ".jpg") == 0 || strcmp(dot, ".jpeg") == 0) return "image/jpeg";
+    if (strcmp(dot, ".png") == 0) return "image/png";
+    if (strcmp(dot, ".gif") == 0) return "image/gif";
+    if (strcmp(dot, ".svg") == 0) return "image/svg+xml";
+    if (strcmp(dot, ".pdf") == 0) return "application/pdf";
+    
+    return "application/octet-stream";
+}
+
+// 获取当前时间的RFC1123格式字符串
+void get_current_time_rfc1123(char *buf, size_t buf_size) {
+    time_t now = time(NULL);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    strftime(buf, buf_size, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+}
+
+// 获取文件最后修改时间的RFC1123格式字符串
+void get_file_mod_time_rfc1123(const char *filename, char *buf, size_t buf_size) {
+    struct stat st;
+    if (stat(filename, &st) == 0) {
+        struct tm tm;
+        gmtime_r(&st.st_mtime, &tm);
+        strftime(buf, buf_size, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+    } else {
+        strncpy(buf, "Thu, 01 Jan 1970 00:00:00 GMT", buf_size);
+    }
+}
 
 // 获取请求头中的字符串信息
 char* get_header_value(const char *headers, const char *key) {
@@ -385,14 +423,13 @@ void handle_events(){
 					char *connection = get_header_value(query_headers, "Connection");
 					client->keep_alive = (connection && strcasecmp(connection, "keep-alive") == 0);
 					
-					// 构造响应
-			
+					// 构造响应printf("New client: %s:%d (fd=%d)\n", client->ipstr, client->port, client_sock);
+					printf("Generate the response to client %s:%d%s(fd=%d)\n", client->ipstr, client->port, path, client->fd);
 					// 处理GET/HEAD 
 					if (strcmp(method, "GET") == 0 || strcmp(method, "HEAD") == 0) {
 						// 获取文件元数据
 						struct stat st;
 						char full_path[PATH_MAX];
-						snprintf(full_path, sizeof(full_path), "/home/project-1/static_site/index.html"); // 这里偷懒直接硬编码了，不过在docker里也还可以吧 
 
 						if (strcmp(path, "/") == 0) {  
 							// 访问根目录，返回 index.html  
@@ -405,10 +442,10 @@ void handle_events(){
 						// 使用 stat 判断文件是否存在且是普通文件  
 						if (stat(full_path, &st) == -1 || !S_ISREG(st.st_mode)) {  
 							// 文件不存在，返回错误响应  
-							size_t resp_len = strlen(internal_error);
+							size_t resp_len = strlen(not_found);
 							// 将错误响应写入缓冲区
 							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
-							memcpy(client->buf, internal_error, resp_len);
+							memcpy(client->buf, not_found, resp_len);
 							client->buf_len = resp_len;
 							// 切换为写事件
 							ev.events = EPOLLOUT;
@@ -456,13 +493,21 @@ void handle_events(){
 
 						// 动态构造响应头
 						char headers[512];
+						// 获取文件信息
+						const char *mime_type = get_mime_type(full_path);
+						char last_modified[128];
+						get_file_mod_time_rfc1123(full_path, last_modified, sizeof(last_modified));
 						// const char *connection_header = client->keep_alive ? "keep-alive" : "close";
 						const char *connection_header =  "keep-alive";
 						int headers_len = snprintf(headers, sizeof(headers),
 							"HTTP/1.1 200 OK\r\n"
+							"Content-Type: %s\r\n"
 							"Content-Length: %ld\r\n"
+							"Last-Modified: %s\r\n"
 							"Connection: %s\r\n\r\n",  // 动态设置
+							mime_type,
 							st.st_size,
+							last_modified,
 							connection_header);
 						// 处理缓冲区溢出
 						if (headers_len >= (int)sizeof(headers)) {
