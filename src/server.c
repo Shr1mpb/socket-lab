@@ -459,6 +459,7 @@ void handle_events(){
 							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
 							memcpy(client->buf, not_found, resp_len);
 							client->buf_len = resp_len;
+							printf("file not found\n"); // 记录日志
 							// 切换为写事件
 							ev.events = EPOLLOUT;
 							ev.data.fd = fd;
@@ -509,8 +510,7 @@ void handle_events(){
 						const char *mime_type = get_mime_type(full_path);
 						char last_modified[128];
 						get_file_mod_time_rfc1123(full_path, last_modified, sizeof(last_modified));
-						// const char *connection_header = client->keep_alive ? "keep-alive" : "close";
-						const char *connection_header =  "keep-alive";
+						const char *connection_header = client->keep_alive ? "keep-alive" : "close";
 						int headers_len = snprintf(headers, sizeof(headers),
 							"HTTP/1.1 200 OK\r\n"
 							"Content-Type: %s\r\n"
@@ -572,11 +572,58 @@ void handle_events(){
 								}
 								continue;  // 跳过后续处理
 							}
+						}else{
+							client->file_offset = -1;
 						}
 						
-					}else{// 处理Post请求 直接echo回去
+					}else if(strcmp(method, "POST") == 0){// 处理Post请求 直接echo回去
+						size_t req_total_len = request_end - client->buf + 4; // 包含\r\n\r\n
+						char header[128];
+						int header_len = snprintf(header, sizeof(header),
+							"HTTP/1.1 200 OK\r\n"
+							"Content-Length: %zd\r\n"
+							"Connection: close\r\n\r\n",  // 简化处理，每次关闭连接
+							req_total_len);
+				
+						// 缓冲区安全检查
+						if ((size_t)header_len + req_total_len > BUF_SIZE) {
+							const char *server_error = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+							size_t resp_len = strlen(server_error);
+								// 将错误响应写入缓冲区
+								if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+								memcpy(client->buf, server_error, resp_len);
+								client->buf_len = resp_len;
+								
+								// 切换为写事件
+								ev.events = EPOLLOUT;
+								ev.data.fd = fd;
+								if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+									perror("epoll_ctl");
+								}
+								continue;  // 跳过后续处理
+						}
+				
+						// 移动原始请求数据(请求头)
+						memmove(client->buf + header_len, client->buf, req_total_len);
+						// 添加响应头
+						memcpy(client->buf, header, header_len);
+						// 更新缓冲区长度
+						client->buf_len = header_len + req_total_len;
 						
 						
+					}else{// 出错
+						size_t resp_len = strlen(bad_request);
+						// 将错误响应写入缓冲区
+						if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
+						memcpy(client->buf, bad_request, resp_len);
+						client->buf_len = resp_len;
+						// 切换为写事件
+						ev.events = EPOLLOUT;
+						ev.data.fd = fd;
+						if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+							perror("epoll_ctl");
+						}
+						continue;  // 跳过后续处理
 					}
 			// // /* 
 			// 	//这里week1是echo响应 上面已改为正常处理请求
@@ -707,11 +754,7 @@ void handle_events(){
 							
 							// 如果文件已发送完成
 							if(client->file_offset >= client->file_size){
-								if(client->file_size == 0){
-									printf("file not found\n");
-								}else{
-									printf("Complete ! file_offset - >%zd , file_size -> %ld\n",client->file_offset, client->file_size);
-								}
+								printf("Complete ! file_offset - >%zd , file_size -> %ld\n",client->file_offset, client->file_size);
 								
 								// 根据keep-alive决定是否关闭连接
 								if (!client->keep_alive) {
@@ -761,7 +804,6 @@ void handle_events(){
 						}
 					}
 					else if (sent == -1 && errno != EAGAIN) {
-						printf("file_offset - >%zd , file_size -> %ld 5555555555555\n ",client->file_offset, client->file_size);
 						// 根据keep-alive决定是否关闭连接
 						if (!client->keep_alive) {
 							close_client(epoll_fd, clients, fd_to_index, fd);

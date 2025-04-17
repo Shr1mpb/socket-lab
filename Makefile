@@ -5,7 +5,7 @@ SRC := $(wildcard $(SRC_DIR)/*.c)
 # all objects
 OBJ := $(OBJ_DIR)/y.tab.o $(OBJ_DIR)/lex.yy.o $(OBJ_DIR)/parse.o $(OBJ_DIR)/example.o
 # all binaries
-BIN := example echo_server echo_client
+BIN := example liso_server echo_client
 # C compiler
 CC  := gcc
 # C PreProcessor Flag
@@ -15,7 +15,7 @@ CFLAGS   := -g -Wall
 # DEPS = parse.h y.tab.h
 
 default: all
-all : example echo_server echo_client
+all : example liso_server echo_client
 
 example: $(OBJ)
 	$(CC) $^ -o $@
@@ -32,7 +32,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(OBJ_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 # 添加server.o到echo_server的依赖
-echo_server: $(OBJ_DIR)/echo_server.o $(OBJ_DIR)/server.o
+liso_server: $(OBJ_DIR)/echo_server.o $(OBJ_DIR)/server.o
 	$(CC) -Werror $^ -o $@
 
 echo_client: $(OBJ_DIR)/echo_client.o
