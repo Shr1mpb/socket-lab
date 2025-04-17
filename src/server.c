@@ -465,7 +465,7 @@ void handle_events(){
 						}  
  
 						// 打开文件
-						int file_fd = open(full_path, O_RDONLY | O_NONBLOCK);// 非阻塞模式
+						int file_fd = open(full_path, O_RDONLY);
 						if (file_fd == -1) {// 打开失败 返回错误
 							size_t resp_len = strlen(internal_error);
 							// 将错误响应写入缓冲区
@@ -543,15 +543,16 @@ void handle_events(){
 							client->file_fd = file_fd;
 							client->file_offset = 0;
 							client->file_size = st.st_size;
+							client->header_out = 0;
+							
 							// 开始读取
-							ssize_t bytes_read = read(file_fd, client->buf + headers_len, BUF_SIZE - headers_len);
+							ssize_t bytes_read = pread(file_fd, client->buf + headers_len, MIN(BUF_SIZE - headers_len, client->file_size), client->file_offset);
 							if (bytes_read > 0) { // 读取成功 
 								if(client->file_size <= BUF_SIZE - headers_len){// 文件大小比缓冲区大小要小
 									client->buf_len += bytes_read; // 直接加上 然后设置offset为-1 表示已经发送完 在写事件时直接发送即可
 									client->file_offset = -1;
 								}else{// 文件大小比缓冲区大小要大 设置偏移量为读取的大小，并在可写事件时继续发送
-									client->buf_len += bytes_read;
-									client->file_offset += bytes_read;
+									// 不做处理 等可写时发送
 								}
 							} else if (bytes_read == -1) {// 读取文件失败
 								size_t resp_len = strlen(internal_error);
@@ -568,8 +569,6 @@ void handle_events(){
 								continue;  // 跳过后续处理
 							}
 						}
-
-						close(file_fd);
 						
 					}else{// 处理Post请求 直接echo回去
 						
@@ -614,7 +613,7 @@ void handle_events(){
 
 					free(path); // 释放路径内存
 					// 切换为写模式
-					ev.events = EPOLLOUT | EPOLLET;
+					ev.events = EPOLLOUT;
 					ev.data.fd = fd;
 					epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
 				}
@@ -638,8 +637,6 @@ void handle_events(){
 						if (sent < client->buf_len) {// 本次发送缓冲区没写完 继续监听可写事件
 							memmove(client->buf, client->buf + sent, client->buf_len - sent);
 							client->buf_len -= sent;
-							ev.events = EPOLLOUT;
-							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
 						} else {// 写完了
 							// 根据keep-alive决定是否关闭连接
 							if (!client->keep_alive) {
@@ -665,18 +662,22 @@ void handle_events(){
 					}
 				}
                 else{ // 无法直接发送完 分批次发送 发完一次后重置状态然后继续监听可写事件
-					ssize_t sent = send(fd, client->buf, client->buf_len, 0);
+					ssize_t sent = send(fd, client->buf, client->buf_len, 0); // 这里如果是第一次发送 就是先发送了响应头
 					if (sent > 0) {// 发送成功
 						if (sent < client->buf_len) {// 本次发送缓冲区没写完 继续监听可写事件
 							memmove(client->buf, client->buf + sent, client->buf_len - sent);
 							client->buf_len -= sent;
 							client->file_offset += sent;
-							ev.events = EPOLLOUT;
-							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
 						} else {// 写完了 但是文件可能尚未发送完成
-							client->file_offset += sent;// 更新已发送的字节数
+							if(client->header_out){
+								client->file_offset += sent;// 更新已发送的文件字节数
+							}else{
+								client->header_out = 1;
+							}
+							
 							// 如果文件已发送完成
 							if(client->file_offset >= client->file_size){
+								printf("Complete ! file_offset - >%zd , file_size -> %ld\n",client->file_offset, client->file_size);
 								// 根据keep-alive决定是否关闭连接
 								if (!client->keep_alive) {
 									close_client(epoll_fd, clients, fd_to_index, fd);
@@ -696,18 +697,16 @@ void handle_events(){
 								
 								// 从文件读取下一块数据
 								ssize_t bytes_read = pread(client->file_fd, client->buf, to_read, client->file_offset);
-								
+								printf("bytes_read = %ld \n", bytes_read);
 								if (bytes_read > 0) {
 									client->buf_len = bytes_read;
-									client->file_offset += bytes_read;
-									
 									// 继续监听可写事件
-									ev.events = EPOLLOUT;
-									epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+									printf("successfully set epollout\n");
+									
 								} else if (bytes_read == -1 && errno != EAGAIN) {
+									printf("bytes_read failed! file_offset - >%zd , file_size -> %ld \n ",client->file_offset, client->file_size);
 									// 文件读取错误 直接关闭连接
 									close_client(epoll_fd, clients, fd_to_index, fd);
-									continue;
 								}
 
 							}
@@ -716,6 +715,7 @@ void handle_events(){
 						}
 					}
 					else if (sent == -1 && errno != EAGAIN) {
+						printf("file_offset - >%zd , file_size -> %ld 5555555555555\n ",client->file_offset, client->file_size);
 						// 根据keep-alive决定是否关闭连接
 						if (!client->keep_alive) {
 							close_client(epoll_fd, clients, fd_to_index, fd);

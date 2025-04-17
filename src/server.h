@@ -39,6 +39,7 @@ typedef struct{
     int file_fd;            // 当前传输的文件描述符
     off_t file_offset;      // 当前文件偏移量
     off_t file_size;        // 文件总大小
+	int header_out; 		// 响应头是否发送
 } Client;
 
 // 存储服务端的一些必要信息
