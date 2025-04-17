@@ -436,7 +436,9 @@ void handle_events(){
 					query_headers[copy_len] = '\0';
 					char *connection = get_header_value(query_headers, "Connection");
 					client->keep_alive = (connection && strcasecmp(connection, "keep-alive") == 0);
-					
+					if(!connection){// 如果没有 默认关闭连接
+						client->keep_alive = 0;
+					}
 					// 构造响应printf("New client: %s:%d (fd=%d)\n", client->ipstr, client->port, client_sock);
 					printf("Generate the response to client %s:%d%s(fd=%d)\n", client->ipstr, client->port, path, client->fd);
 					// 处理GET/HEAD 
@@ -510,15 +512,21 @@ void handle_events(){
 						char headers[512];
 						// 获取文件信息
 						const char *mime_type = get_mime_type(full_path);
+						// 获取时间信息
+						char date_buf[64];
+						get_current_time_rfc1123(date_buf, sizeof(date_buf));
 						char last_modified[128];
 						get_file_mod_time_rfc1123(full_path, last_modified, sizeof(last_modified));
 						const char *connection_header = client->keep_alive ? "keep-alive" : "close";
 						int headers_len = snprintf(headers, sizeof(headers),
 							"HTTP/1.1 200 OK\r\n"
+							"Server: liso/1.1\r\n"
+							"Date: %s\r\n"
 							"Content-Type: %s\r\n"
 							"Content-Length: %ld\r\n"
 							"Last-Modified: %s\r\n"
 							"Connection: %s\r\n\r\n",  // 动态设置
+							date_buf,
 							mime_type,
 							st.st_size,
 							last_modified,
