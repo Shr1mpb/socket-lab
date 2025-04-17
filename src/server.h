@@ -34,6 +34,11 @@ typedef struct{
     int port;            // 客户端端口
 	int current_clients;
 	int keep_alive; 	 // 持久连接
+
+	// 新增文件传输相关字段
+    int file_fd;            // 当前传输的文件描述符
+    off_t file_offset;      // 当前文件偏移量
+    off_t file_size;        // 文件总大小
 } Client;
 
 // 存储服务端的一些必要信息

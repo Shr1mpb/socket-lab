@@ -90,6 +90,14 @@ void close_client(int epoll_fd, Client *clients, int *fd_to_index, int fd) {
         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
         close(fd);
     }
+
+	int idx = fd_to_index[fd];
+	Client *client = &clients[idx];
+	// 关闭fd
+	if (client->file_fd != -1) {
+		close(client->file_fd);
+		client->file_fd = -1;
+	}
 }
 
 void handle_signal(int sig) {
@@ -455,9 +463,9 @@ void handle_events(){
 							}
 							continue;  // 跳过后续处理
 						}  
-
+ 
 						// 打开文件
-						int file_fd = open(full_path, O_RDONLY);
+						int file_fd = open(full_path, O_RDONLY | O_NONBLOCK);// 非阻塞模式
 						if (file_fd == -1) {// 打开失败 返回错误
 							size_t resp_len = strlen(internal_error);
 							// 将错误响应写入缓冲区
@@ -509,7 +517,7 @@ void handle_events(){
 							st.st_size,
 							last_modified,
 							connection_header);
-						// 处理缓冲区溢出
+						// 处理响应头缓冲区溢出
 						if (headers_len >= (int)sizeof(headers)) {
 							close(file_fd);
 							size_t resp_len = strlen(internal_error);
@@ -531,9 +539,20 @@ void handle_events(){
 
 						// GET方法需要发送文件内容（HEAD不发送）
 						if (strcmp(method, "GET") == 0) {
+							// 先设置文件状态
+							client->file_fd = file_fd;
+							client->file_offset = 0;
+							client->file_size = st.st_size;
+							// 开始读取
 							ssize_t bytes_read = read(file_fd, client->buf + headers_len, BUF_SIZE - headers_len);
-							if (bytes_read > 0) {
-								client->buf_len += bytes_read;
+							if (bytes_read > 0) { // 读取成功 
+								if(client->file_size <= BUF_SIZE - headers_len){// 文件大小比缓冲区大小要小
+									client->buf_len += bytes_read; // 直接加上 然后设置offset为-1 表示已经发送完 在写事件时直接发送即可
+									client->file_offset = -1;
+								}else{// 文件大小比缓冲区大小要大 设置偏移量为读取的大小，并在可写事件时继续发送
+									client->buf_len += bytes_read;
+									client->file_offset += bytes_read;
+								}
 							} else if (bytes_read == -1) {// 读取文件失败
 								size_t resp_len = strlen(internal_error);
 								// 将错误响应写入缓冲区
@@ -611,31 +630,104 @@ void handle_events(){
                 if (idx == -1 || idx >= MAX_CLIENTS) continue;
                 
                 Client *client = &clients[idx];
-                ssize_t sent = send(fd, client->buf, client->buf_len, 0);
 
-                if (sent > 0) {
-                    if (sent < client->buf_len) {// 没写完 继续监听可写事件
-                        memmove(client->buf, client->buf + sent, client->buf_len - sent);
-                        client->buf_len -= sent;
-                    } else {// 写完了
-                        client->buf_len = 0;
-                        // 恢复监听读事件
-                        ev.events = EPOLLIN;
-                        ev.data.fd = fd;
-                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
-                    }
-                }
-                else if (sent == -1 && errno != EAGAIN) {
-					// 根据keep-alive决定是否关闭连接
-					if (!client->keep_alive) {
-						close_client(epoll_fd, clients, fd_to_index, fd);
-					} else {
-						// 重置缓冲区准备接收新请求
-						client->buf_len = 0;
-						ev.events = EPOLLIN;
-						epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+				if(client->file_offset == -1){// 可以一次发送完 直接发送完
+					ssize_t sent = send(fd, client->buf, client->buf_len, 0);
+
+					if (sent > 0) {
+						if (sent < client->buf_len) {// 本次发送缓冲区没写完 继续监听可写事件
+							memmove(client->buf, client->buf + sent, client->buf_len - sent);
+							client->buf_len -= sent;
+							ev.events = EPOLLOUT;
+							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+						} else {// 写完了
+							// 根据keep-alive决定是否关闭连接
+							if (!client->keep_alive) {
+								close_client(epoll_fd, clients, fd_to_index, fd);
+							} else {
+								// 重置缓冲区准备接收新请求
+								client->buf_len = 0;
+								ev.events = EPOLLIN;
+								epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+							}
+						}
 					}
-                }
+					else if (sent == -1 && errno != EAGAIN) {
+						// 根据keep-alive决定是否关闭连接
+						if (!client->keep_alive) {
+							close_client(epoll_fd, clients, fd_to_index, fd);
+						} else {
+							// 重置缓冲区准备接收新请求
+							client->buf_len = 0;
+							ev.events = EPOLLIN;
+							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+						}
+					}
+				}
+                else{ // 无法直接发送完 分批次发送 发完一次后重置状态然后继续监听可写事件
+					ssize_t sent = send(fd, client->buf, client->buf_len, 0);
+					if (sent > 0) {// 发送成功
+						if (sent < client->buf_len) {// 本次发送缓冲区没写完 继续监听可写事件
+							memmove(client->buf, client->buf + sent, client->buf_len - sent);
+							client->buf_len -= sent;
+							client->file_offset += sent;
+							ev.events = EPOLLOUT;
+							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+						} else {// 写完了 但是文件可能尚未发送完成
+							client->file_offset += sent;// 更新已发送的字节数
+							// 如果文件已发送完成
+							if(client->file_offset >= client->file_size){
+								// 根据keep-alive决定是否关闭连接
+								if (!client->keep_alive) {
+									close_client(epoll_fd, clients, fd_to_index, fd);
+								} else {
+									// 重置缓冲区准备接收新请求
+									client->buf_len = 0;
+									ev.events = EPOLLIN;
+									epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+								}
+							}else{// 文件还没发送完
+								// 缓冲区大小置0
+								client->buf_len = 0;
+								
+								 // 计算剩余需要读取的字节数
+								off_t remaining = client->file_size - client->file_offset;
+								size_t to_read = MIN(BUF_SIZE, remaining);
+								
+								// 从文件读取下一块数据
+								ssize_t bytes_read = pread(client->file_fd, client->buf, to_read, client->file_offset);
+								
+								if (bytes_read > 0) {
+									client->buf_len = bytes_read;
+									client->file_offset += bytes_read;
+									
+									// 继续监听可写事件
+									ev.events = EPOLLOUT;
+									epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+								} else if (bytes_read == -1 && errno != EAGAIN) {
+									// 文件读取错误 直接关闭连接
+									close_client(epoll_fd, clients, fd_to_index, fd);
+									continue;
+								}
+
+							}
+
+							
+						}
+					}
+					else if (sent == -1 && errno != EAGAIN) {
+						// 根据keep-alive决定是否关闭连接
+						if (!client->keep_alive) {
+							close_client(epoll_fd, clients, fd_to_index, fd);
+						} else {
+							// 重置缓冲区准备接收新请求
+							client->buf_len = 0;
+							ev.events = EPOLLIN;
+							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+						}
+					}
+				}
             }
+			
         }
 }
