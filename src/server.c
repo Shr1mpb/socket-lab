@@ -180,13 +180,17 @@ void handle_events(){
         for (int i = 0; i < nfds; i++) {
             int fd = events[i].data.fd;
             
-            // 新客户端连接
+            // 新客户端连接 当服务端socket被epoll_wait返回时(即可读时) 注意 有连接处于keep-alive状态会使得epoll每次都返回服务端socket的fd
             if (fd == sock) {
                 struct sockaddr_in cli_addr;
                 socklen_t cli_len = sizeof(cli_addr);
                 int client_sock = accept(sock, (struct sockaddr*)&cli_addr, &cli_len);
                 
                 if (client_sock == -1) {
+					if (errno == EAGAIN || errno == EWOULDBLOCK){// 如果是keep-alive，accept会返回这两个状态 直接继续循环就可以
+						continue;
+					}
+					// 是新连接 如果连接错误输出错误日志
                     perror("accept failed");
                     continue;
                 }
