@@ -646,10 +646,23 @@ void handle_events(){
 							if (!client->keep_alive) {
 								close_client(epoll_fd, clients, fd_to_index, fd);
 							} else {
-								// 重置缓冲区准备接收新请求
+								// 完全重置客户端状态
 								client->buf_len = 0;
+								client->file_offset = -1;
+								client->file_size = 0;
+								client->header_out = 0;
+								if (client->file_fd != -1) {
+									close(client->file_fd);
+									client->file_fd = -1;
+								}
+								
+								// 重新注册EPOLLIN事件
 								ev.events = EPOLLIN;
-								epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+								ev.data.fd = fd;
+								if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+									perror("epoll_ctl mod failed");
+									close_client(epoll_fd, clients, fd_to_index, fd);
+								}
 							}
 						}
 					}
@@ -658,10 +671,23 @@ void handle_events(){
 						if (!client->keep_alive) {
 							close_client(epoll_fd, clients, fd_to_index, fd);
 						} else {
-							// 重置缓冲区准备接收新请求
+							// 完全重置客户端状态
 							client->buf_len = 0;
+							client->file_offset = -1;
+							client->file_size = 0;
+							client->header_out = 0;
+							if (client->file_fd != -1) {
+								close(client->file_fd);
+								client->file_fd = -1;
+							}
+							
+							// 重新注册EPOLLIN事件
 							ev.events = EPOLLIN;
-							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl mod failed");
+								close_client(epoll_fd, clients, fd_to_index, fd);
+							}
 						}
 					}
 				}
@@ -681,15 +707,33 @@ void handle_events(){
 							
 							// 如果文件已发送完成
 							if(client->file_offset >= client->file_size){
-								printf("Complete ! file_offset - >%zd , file_size -> %ld\n",client->file_offset, client->file_size);
+								if(client->file_size == 0){
+									printf("file not found\n");
+								}else{
+									printf("Complete ! file_offset - >%zd , file_size -> %ld\n",client->file_offset, client->file_size);
+								}
+								
 								// 根据keep-alive决定是否关闭连接
 								if (!client->keep_alive) {
 									close_client(epoll_fd, clients, fd_to_index, fd);
 								} else {
-									// 重置缓冲区准备接收新请求
+									// 完全重置客户端状态
 									client->buf_len = 0;
+									client->file_offset = -1;
+									client->file_size = 0;
+									client->header_out = 0;
+									if (client->file_fd != -1) {
+										close(client->file_fd);
+										client->file_fd = -1;
+									}
+									
+									// 重新注册EPOLLIN事件
 									ev.events = EPOLLIN;
-									epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+									ev.data.fd = fd;
+									if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+										perror("epoll_ctl mod failed");
+										close_client(epoll_fd, clients, fd_to_index, fd);
+									}
 								}
 							}else{// 文件还没发送完
 								// 缓冲区大小置0
@@ -704,8 +748,6 @@ void handle_events(){
 								printf("bytes_read = %ld \n", bytes_read);
 								if (bytes_read > 0) {
 									client->buf_len = bytes_read;
-									// 继续监听可写事件
-									printf("successfully set epollout\n");
 									
 								} else if (bytes_read == -1 && errno != EAGAIN) {
 									printf("bytes_read failed! file_offset - >%zd , file_size -> %ld \n ",client->file_offset, client->file_size);
@@ -724,10 +766,23 @@ void handle_events(){
 						if (!client->keep_alive) {
 							close_client(epoll_fd, clients, fd_to_index, fd);
 						} else {
-							// 重置缓冲区准备接收新请求
+							// 完全重置客户端状态
 							client->buf_len = 0;
+							client->file_offset = -1;
+							client->file_size = 0;
+							client->header_out = 0;
+							if (client->file_fd != -1) {
+								close(client->file_fd);
+								client->file_fd = -1;
+							}
+							
+							// 重新注册EPOLLIN事件
 							ev.events = EPOLLIN;
-							epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+							ev.data.fd = fd;
+							if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+								perror("epoll_ctl mod failed");
+								close_client(epoll_fd, clients, fd_to_index, fd);
+							}
 						}
 					}
 				}
