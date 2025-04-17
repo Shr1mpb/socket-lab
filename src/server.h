@@ -22,8 +22,6 @@
 #define MAX_EVENTS 1024 // event_poll最大事件数量
 
 static volatile int global_sock = -1;
-extern char *bad_request;
-extern char *not_implemented;
 
 // 客户端连接状态
 typedef struct{

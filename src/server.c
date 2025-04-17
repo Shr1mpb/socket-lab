@@ -241,6 +241,7 @@ void handle_events(){
 				
 				Client *client = &clients[idx];
 				ssize_t readret = recv(fd, client->buf + client->buf_len, BUF_SIZE - client->buf_len, 0);
+				client->file_offset = -1; // 默认设置一次即可发完
 			
 				if (readret > 0) {
 					client->buf_len += readret;
@@ -298,7 +299,6 @@ void handle_events(){
 					// 验证请求行基本结构
 					if (!method_end0 || !path_end0 || !proto_start0 || // 校验是否有空格分割的三个部分
 						(proto_start0 - client->buf) >= BUF_SIZE ||  // 防止越界
-						strcmp(proto_start0, "HTTP/1.1") != 0 || // 校验协议
 						strncmp(path_start0, "/", 1) != 0 // 校验路径以 / 开头
 					) {
 							size_t resp_len = strlen(bad_request);
@@ -382,25 +382,27 @@ void handle_events(){
 							}
 							continue;  // 跳过后续处理
 					}
-					
-					// 严格协议版本检查
-					char *proto_start = strstr(client->buf, "HTTP/1.1");
-					char *proto_start1;
-					if (!proto_start || (proto_start - client->buf) > 128) {// 没找到 HTTP/1.1 子字符串 或者 超过128字节(请求行非法)
-						if (proto_start1 = strstr(client->buf, "HTTP/")){// 有HTTP/字段 说明协议版本不对
-							size_t resp_len = strlen(v_not_supported);
-							// 将错误响应写入缓冲区
-							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
-							memcpy(client->buf, v_not_supported, resp_len);
-							client->buf_len = resp_len;
 
-						}else{
-							size_t resp_len = strlen(bad_request);
-							// 将错误响应写入缓冲区
-							if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
-							memcpy(client->buf, bad_request, resp_len);
-							client->buf_len = resp_len;
-						}
+				
+
+					// 严格协议版本检查
+					char *method_end = strchr(client->buf, ' ');
+					char *path_start = method_end ? method_end + 1 : NULL;
+					char *path_end = path_start ? strchr(path_start, ' ') : NULL;
+					char *proto_start = path_end ? path_end + 1 : NULL;
+					if (!proto_start || !line_end || (line_end - proto_start) < 8 || 
+					strncmp(proto_start, "HTTP/1.1", 8) != 0 || 
+					((line_end - proto_start) > 8  && (proto_start[8] != '\r'))) {
+						 	// 协议版本不是 HTTP/1.1
+							 if (strstr(client->buf, "HTTP/")) {
+								size_t resp_len = strlen(v_not_supported);
+								memcpy(client->buf, v_not_supported, resp_len);
+								client->buf_len = resp_len;
+							}else {
+								size_t resp_len = strlen(bad_request);
+								memcpy(client->buf, bad_request, resp_len);
+								client->buf_len = resp_len;
+							}
 							// 切换为写事件
 							ev.events = EPOLLOUT;
 							ev.data.fd = fd;
@@ -574,6 +576,7 @@ void handle_events(){
 							}
 						}else{
 							client->file_offset = -1;
+							close(file_fd);
 						}
 						
 					}else if(strcmp(method, "POST") == 0){// 处理Post请求 直接echo回去
@@ -603,7 +606,7 @@ void handle_events(){
 								continue;  // 跳过后续处理
 						}
 				
-						// 移动原始请求数据(请求头)
+						// 移动原始请求数据(放在响应头后)
 						memmove(client->buf + header_len, client->buf, req_total_len);
 						// 添加响应头
 						memcpy(client->buf, header, header_len);
