@@ -20,7 +20,24 @@
 */
 #include "server.h"
 extern Server server;
-int main() {
+int main(int argc, char *argv[]) {
+	char *exec_path = argv[0];
+    if (realpath(exec_path, ROOT_DIR) != NULL) {
+        // 找到最后一个 '/' 并截断（去掉文件名）
+        char *last_slash = strrchr(ROOT_DIR, '/');
+        if (last_slash != NULL) {
+            *last_slash = '\0';  // 截断到目录部分
+        }
+        
+        // 拼接 "/static_site"
+        strncat(ROOT_DIR, "/static_site", sizeof(ROOT_DIR) - strlen(ROOT_DIR) - 1);
+        
+        printf("Final ROOT_DIR: %s\n", ROOT_DIR);
+    } else {
+        perror("realpath() failed");
+        return 1;
+    }
+
 	init_server();
     while (1) {
         handle_events();

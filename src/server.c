@@ -14,8 +14,7 @@ const char *internal_error = "HTTP/1.1 500 Internal server error\r\n\r\n";
 
 // http的最长url
 const int PATH_MAX = 2083;
-// 文件根目录
-const char* ROOT_DIR = "/home/project-1/static_site";
+
 int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) return -1;
@@ -109,6 +108,14 @@ void handle_signal(int sig) {
 }
 
 void init_server(){
+	// // 重定向输出到日志文件
+	// FILE* log_file = freopen("output.log", "a", stdout);
+    // if (!log_file) {
+    //     perror("Failed to open log file");
+    //     return 1;
+    // }
+
+
 	// 注册信号处理器 回调handle_signal关闭socket
 	signal(SIGINT, handle_signal); // 处理CTRL+C产生的信号 
     signal(SIGTERM, handle_signal);// 处理KILL产生的信号 
@@ -237,16 +244,34 @@ void handle_events(){
             // 客户端可读事件
             else if (events[i].events & EPOLLIN) {
 				int idx = fd_to_index[fd];
-				if (idx == -1 || idx >= MAX_CLIENTS) continue;
-				
 				Client *client = &clients[idx];
 				ssize_t readret = recv(fd, client->buf + client->buf_len, BUF_SIZE - client->buf_len, 0);
-				client->file_offset = -1; // 默认设置一次即可发完
-			
+				int request_count = 0;
 				if (readret > 0) {
 					client->buf_len += readret;
-					client->buf[client->buf_len] = '\0'; // 确保字符串终止
-
+					client->buf[client->buf_len] = '\0';
+			
+					// 混合处理逻辑核心
+					char *current_ptr = client->buf;
+					
+					// 循环检测完整请求头
+					while ((request_count < MAX_PIPELINE_REQUESTS) && 
+						  (current_ptr = strstr(current_ptr, "\r\n\r\n"))) {
+						request_count++;
+						current_ptr += 4; // 移动到下一个请求起始位置
+					}
+				}else if (readret <= 0 && errno != EAGAIN) { // 没有能读到的了 关闭连接
+					close_client(epoll_fd, clients, fd_to_index, fd);
+					clients[idx].fd = -1;
+					current_clients--;
+				}
+				if (request_count > 1)// pipeline请求 新逻辑
+				{
+					printf("Pipeline %d requests...\n",request_count);
+					/* code */
+				}
+				else{ // 只有单个请求 走原本的逻辑处理单个请求即可
+					printf("Single request...\n");
 					char *request_end = strstr(client->buf, "\r\n\r\n"); // 检测完整HTTP头
 					if (!request_end) {
 						// 请求不完整时保持读取
@@ -472,7 +497,7 @@ void handle_events(){
 							}
 							continue;  // 跳过后续处理
 						}  
- 
+
 						// 打开文件
 						int file_fd = open(full_path, O_RDONLY);
 						if (file_fd == -1) {// 打开失败 返回错误
@@ -636,53 +661,12 @@ void handle_events(){
 						}
 						continue;  // 跳过后续处理
 					}
-			// // /* 
-			// 	//这里week1是echo响应 上面已改为正常处理请求
-			// 		// 构造ECHO响应
-			// 		size_t req_total_len = request_end - client->buf + 4; // 包含\r\n\r\n
-			// 		char header[128];
-			// 		int header_len = snprintf(header, sizeof(header),
-			// 			"HTTP/1.1 200 OK\r\n"
-			// 			"Content-Length: %zd\r\n"
-			// 			"Connection: close\r\n\r\n",  // 简化处理，每次关闭连接
-			// 			req_total_len);
-			
-			// 		// 缓冲区安全检查
-			// 		if ((size_t)header_len + req_total_len > BUF_SIZE) {
-			// 			const char *server_error = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnect: close\r\n\r\n";
-			// 			size_t resp_len = strlen(server_error);
-			// 				// 将错误响应写入缓冲区
-			// 				if (resp_len > BUF_SIZE) resp_len = BUF_SIZE;  // 防溢出
-			// 				memcpy(client->buf, server_error, resp_len);
-			// 				client->buf_len = resp_len;
-							
-			// 				// 切换为写事件
-			// 				ev.events = EPOLLOUT;
-			// 				ev.data.fd = fd;
-			// 				if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
-			// 					perror("epoll_ctl");
-			// 				}
-			// 				continue;  // 跳过后续处理
-			// 		}
-			
-			// 		// 移动原始请求数据(请求头)
-			// 		memmove(client->buf + header_len, client->buf, req_total_len);
-			// 		// 添加响应头
-			// 		memcpy(client->buf, header, header_len);
-			// 		// 更新缓冲区长度
-			// 		client->buf_len = header_len + req_total_len;
-			// // */
 
 					free(path); // 释放路径内存
 					// 切换为写模式
 					ev.events = EPOLLOUT;
 					ev.data.fd = fd;
 					epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);
-				}
-				else if (readret <= 0 && errno != EAGAIN) { // 没有能读到的了 关闭连接
-					close_client(epoll_fd, clients, fd_to_index, fd);
-					clients[idx].fd = -1;
-					current_clients--;
 				}
 			}
             // 客户端可写事件
