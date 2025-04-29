@@ -21,7 +21,7 @@
 #define ECHO_PORT 9999 // 服务器监听的端口
 #define MAX_CLIENTS 1024  // 最大客户端数量
 #define MAX_EVENTS 1024 // event_poll最大事件数量
-#define MAX_PIPELINE_REQUESTS 10 // 最大的pipeline请求个数
+#define MAX_PIPELINE_REQUESTS 30 // 最大的pipeline请求个数
 #define MAX_REQUEST_SIZE 1024 // 最大单个pipeline请求的大小
 
 char ROOT_DIR[4096];
@@ -41,6 +41,10 @@ typedef struct{
     off_t file_offset;      // 当前文件偏移量
     off_t file_size;        // 文件总大小
 	int header_out; 		// 响应头是否发送
+	char temp_request_buf[BUF_SIZE/2]; 	// 临时请求缓冲区 用于pipeline时读取下面的没发完的请求
+	int temp_request_buf_on;			// 是否开启临时请求缓冲区
+	int temp_request_buf_size;			// 临时请求缓冲区中的内容大小
+	int last_request_len;				// 上一个解析出的pipeline请求的大小
 } Client;
 
 // 存储服务端的一些必要信息
