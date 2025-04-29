@@ -268,7 +268,550 @@ void handle_events(){
 				if (request_count > 1)// pipeline请求 新逻辑
 				{
 					printf("Pipeline %d requests...\n",request_count);
-					/* code */
+					char *current_ptr = client->buf;
+					// 建立缓冲区 存储每个请求
+					// char *pipeline_requests = malloc(client->buf_len + request_count);
+					char *pipeline_requests = malloc(client->buf_len + request_count);
+					char *pipeline_requests_ptr = pipeline_requests;
+					int temp = request_count;
+					// 一个一个把请求放在缓冲区中 这里使用pipeline_requests_ptr来迭代处理
+					while (temp-- > 0){
+						char *request_end = strstr(current_ptr, "\r\n\r\n"); // 获取当前请求
+						if (!request_end) break;
+
+						// 计算单个请求长度
+						size_t request_len = request_end - current_ptr + 4;
+
+						// 生成独立请求缓冲区
+						char *single_request = malloc(request_len + 1);
+						memcpy(single_request, current_ptr, request_len);
+						single_request[request_len] = '\0';
+
+						// 将独立请求缓冲区中的内容放在pipeline_requests中
+						memcpy(pipeline_requests_ptr, single_request, request_len + 1);
+
+						// 移动处理指针
+						current_ptr += request_len;
+						pipeline_requests_ptr += request_len;
+						free(single_request);
+					}
+					// printf("pipeline_requests: \n %s \n",pipeline_requests);
+					// 一个一个处理请求 这里使用pipeline_requests_ptrr来迭代处理
+					char* pipeline_requests_ptrr = pipeline_requests;
+					client->file_offset = -1; // 设置为一次可以全发送完
+					char* client_response_buf = malloc(BUF_SIZE);
+					int client_response_buf_len = 0;
+					char* client_response_buf_ptr = client_response_buf;
+					
+					while(request_count-- > 0){
+						char* request_start = pipeline_requests_ptrr;
+						char* request_end = strstr(pipeline_requests_ptrr,"\r\n\r\n");
+						int request_len = request_end - request_start + 4;
+						*request_end = '\0';
+						printf("request %d is:\n%s\n",5-request_count,request_start);
+						*request_end = '\r';
+						// 开始处理请求
+							// 严格解析请求行
+							char *line_end = strstr(request_start, "\r\n");
+							if (!line_end) {// 找不到请求行
+								size_t resp_len = strlen(bad_request);
+									// 将错误响应写入缓冲区
+									// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+									if (client_response_buf_len + resp_len > BUF_SIZE) {
+										printf("error1\n");
+										client_response_buf_len = BUF_SIZE;
+										client_response_buf[BUF_SIZE] = '\0';
+										// 切换为写事件
+										ev.events = EPOLLOUT;
+										ev.data.fd = fd;
+										if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+											perror("epoll_ctl");
+										}
+										continue;// 跳过后续while(1)中的处理
+
+									}
+									pipeline_requests_ptrr += request_len;
+									// 还没到缓冲区大小限制
+									memcpy(client_response_buf_ptr, bad_request, resp_len);
+									client_response_buf_len = resp_len;
+									client_response_buf_ptr += resp_len;
+									continue;;// 跳过后续while(1)中的处理
+									
+							}
+							// 截断协议并验证：这里先只验证 路径 和 协议
+							// ------------------------开始验证---------------------------------
+							*line_end = '\0';// 截断协议用于下面验证
+
+							// 分割请求行各部分
+							char *method_end0 = strchr(request_start, ' ');
+							char *path_start0 = method_end0 ? method_end0 + 1 : NULL;
+							char *path_end0 = strchr(method_end0 ? method_end0 + 1 : request_start, ' ');
+							char *proto_start0 = path_end0 ? path_end0 + 1 : NULL;
+
+							// 验证请求行基本结构
+							if (!method_end0 || !path_end0 || !proto_start0 || // 校验是否有空格分割的三个部分
+								(proto_start0 - client->buf) >= BUF_SIZE ||  // 防止越界
+								strncmp(path_start0, "/", 1) != 0 // 校验路径以 / 开头
+							) {
+								size_t resp_len = strlen(bad_request);
+								// 将错误响应写入缓冲区
+								// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+								if (client_response_buf_len + resp_len > BUF_SIZE) {
+									printf("error2\n");
+									client_response_buf_len = BUF_SIZE;
+									client_response_buf[BUF_SIZE] = '\0';
+									// 切换为写事件
+									ev.events = EPOLLOUT;
+									ev.data.fd = fd;
+									if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+										perror("epoll_ctl");
+									}
+									continue;// 跳过后续while(1)中的处理
+
+								}
+								pipeline_requests_ptrr += request_len;
+								// 还没到缓冲区大小限制
+								memcpy(client_response_buf_ptr, bad_request, resp_len);
+								client_response_buf_len = resp_len;
+								client_response_buf_ptr += resp_len;
+								continue;// 跳过后续while(1)中的处理
+							}
+
+							*line_end = '\r';// 把截断的协议字符串复原
+							// ------------------------结束验证---------------------------------
+							// 提取path:
+							// 提取路径
+							size_t path_len = path_end0 - path_start0;
+							char *path = malloc(path_len + 1);  // +1 为了结尾的\0
+							memcpy(path, path_start0, path_len);
+							path[path_len] = '\0';  // 结束
+							
+							// 验证路径合法性
+							if (strstr(path, "..")) {
+								size_t resp_len = strlen(bad_request);
+								// 将错误响应写入缓冲区
+								// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+								if (client_response_buf_len + resp_len > BUF_SIZE) {
+									printf("error3\n");
+									client_response_buf_len = BUF_SIZE;
+									client_response_buf[BUF_SIZE] = '\0';
+									// 切换为写事件
+									ev.events = EPOLLOUT;
+									ev.data.fd = fd;
+									if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+										perror("epoll_ctl");
+									}
+									continue;// 跳过后续while(1)中的处理
+
+								}
+								pipeline_requests_ptrr += request_len;
+								// 还没到缓冲区大小限制
+								memcpy(client_response_buf_ptr, bad_request, resp_len);
+								client_response_buf_len = resp_len;
+								client_response_buf_ptr += resp_len;
+								continue;// 跳过后续while(1)中的处理
+							}
+							// 方法截断并验证
+							if (!method_end0) {
+								size_t resp_len = strlen(bad_request);
+								// 将错误响应写入缓冲区
+								// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+								if (client_response_buf_len + resp_len > BUF_SIZE) {
+									printf("error4\n");
+									client_response_buf_len = BUF_SIZE;
+									client_response_buf[BUF_SIZE] = '\0';
+									// 切换为写事件
+									ev.events = EPOLLOUT;
+									ev.data.fd = fd;
+									if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+										perror("epoll_ctl");
+									}
+									continue;// 跳过后续while(1)中的处理
+
+								}
+								pipeline_requests_ptrr += request_len;
+								// 还没到缓冲区大小限制
+								memcpy(client_response_buf_ptr, bad_request, resp_len);
+								client_response_buf_len = resp_len;
+								client_response_buf_ptr += resp_len;
+								continue;// 跳过后续while(1)中的处理
+							}
+							// 提取方法（安全拷贝）
+							char method[16] = {0};
+							strncpy(method, request_start, method_end0 - request_start);
+							method[15] = '\0'; // 强制截断防止溢出
+							// 方法验证
+							if (strcmp(method, "GET") != 0 && 
+								strcmp(method, "HEAD") != 0 && 
+								strcmp(method, "POST") != 0) 
+							{
+								size_t resp_len = strlen(not_implemented);
+								// 将错误响应写入缓冲区
+								// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+								if (client_response_buf_len + resp_len > BUF_SIZE) {
+									printf("error5!\n");
+									client_response_buf_len = BUF_SIZE;
+									client_response_buf[BUF_SIZE] = '\0';
+									// 切换为写事件
+									ev.events = EPOLLOUT;
+									ev.data.fd = fd;
+									if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+										perror("epoll_ctl");
+									}
+									continue;// 跳过后续while(1)中的处理
+
+								}
+								pipeline_requests_ptrr += request_len;
+								// 还没到缓冲区大小限制
+								memcpy(client_response_buf_ptr, not_implemented, resp_len);
+								client_response_buf_len = resp_len;
+								client_response_buf_ptr += resp_len;
+								continue;// 跳过后续while(1)中的处理
+							}
+						
+
+							// 严格协议版本检查
+							char *method_end = strchr(request_start, ' ');
+							char *path_start = method_end ? method_end + 1 : NULL;
+							char *path_end = path_start ? strchr(path_start, ' ') : NULL;
+							char *proto_start = path_end ? path_end + 1 : NULL;
+							if (!proto_start || !line_end || (line_end - proto_start) < 8 || 
+							strncmp(proto_start, "HTTP/1.1", 8) != 0 || 
+							((line_end - proto_start) > 8  && (proto_start[8] != '\r'))) {
+									// 协议版本不是 HTTP/1.1
+									if (strstr(request_start, "HTTP/")) {
+										size_t resp_len = strlen(v_not_supported);
+										// 将错误响应写入缓冲区
+										// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+										if (client_response_buf_len + resp_len > BUF_SIZE) {
+											printf("error6\n");
+											client_response_buf_len = BUF_SIZE;
+											client_response_buf[BUF_SIZE] = '\0';
+											// 切换为写事件
+											ev.events = EPOLLOUT;
+											ev.data.fd = fd;
+											if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+												perror("epoll_ctl");
+											}
+											continue;// 跳过后续while(1)中的处理
+
+										}
+										pipeline_requests_ptrr += request_len;
+										// 还没到缓冲区大小限制
+										memcpy(client_response_buf_ptr, v_not_supported, resp_len);
+										client_response_buf_len = resp_len;
+										client_response_buf_ptr += resp_len;
+										continue;// 跳过后续while(1)中的处理
+									}else {
+										size_t resp_len = strlen(not_implemented);
+										// 将错误响应写入缓冲区
+										// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+										if (client_response_buf_len + resp_len > BUF_SIZE) {
+											printf("error7\n");
+											client_response_buf_len = BUF_SIZE;
+											client_response_buf[BUF_SIZE] = '\0';
+											// 切换为写事件
+											ev.events = EPOLLOUT;
+											ev.data.fd = fd;
+											if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+												perror("epoll_ctl");
+											}
+											continue;// 跳过后续while(1)中的处理
+
+										}
+										pipeline_requests_ptrr += request_len;
+										// 还没到缓冲区大小限制
+										memcpy(client_response_buf_ptr, not_implemented, resp_len);
+										client_response_buf_len = resp_len;
+										client_response_buf_ptr += resp_len;
+										continue;// 跳过后续while(1)中的处理
+									}
+							}
+							// 读取请求头
+							char q_headers[BUF_SIZE];
+							int q_headers_len;
+							if (request_end) {
+								// 计算请求头长度（包含最后的 \r\n\r\n）
+								size_t headers_total_len = request_end - request_start + 4;
+								
+								// 将头信息复制到专用缓冲区
+								memcpy(q_headers, request_start, headers_total_len);
+								q_headers_len = headers_total_len;
+								q_headers[q_headers_len] = '\0';
+								
+								// // 剩余数据是请求体（如果有）这里假定pipeline请求没有请求体
+								// size_t body_len = request_end - headers_total_len;
+								// memmove(request_start, request_start + headers_total_len, body_len);
+								// client_response_buf_len= body_len;
+							}
+
+							char query_headers[4096]; // 获取请求头中的keep_alive部分
+							memcpy(query_headers, q_headers, q_headers_len + 1); // +1 复制终止符
+							size_t copy_len = MIN(q_headers_len, sizeof(query_headers)-1);
+							query_headers[copy_len] = '\0';
+							char *connection = get_header_value(query_headers, "Connection");
+							client->keep_alive = (connection && strcasecmp(connection, "keep-alive") == 0);
+							if(!connection){// 如果没有 默认关闭连接
+								client->keep_alive = 0;
+							}
+							// 构造响应printf("New client: %s:%d (fd=%d)\n", client->ipstr, client->port, client_sock);
+							printf("Generate the response to client %s:%d%s(fd=%d)\n", client->ipstr, client->port, path, client->fd);
+							// 处理GET/HEAD 
+							if (strcmp(method, "GET") == 0 || strcmp(method, "HEAD") == 0) {
+								// 获取文件元数据
+								struct stat st;
+								char full_path[PATH_MAX];
+
+								if (strcmp(path, "/") == 0) {  
+									// 访问根目录，返回 index.html  
+									snprintf(full_path, sizeof(full_path), "%s/index.html", ROOT_DIR);  
+								} else {   
+									// 防止目录穿越攻击在之前读出path的时候已经做过
+									snprintf(full_path, sizeof(full_path), "%s%s", ROOT_DIR, path);  
+								}  
+
+								// 使用 stat 判断文件是否存在且是普通文件  
+								if (stat(full_path, &st) == -1 || !S_ISREG(st.st_mode)) {  
+									printf("file not found\n"); // 记录日志
+									size_t resp_len = strlen(not_found);
+										// 将错误响应写入缓冲区
+										// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+										if (client_response_buf_len + resp_len > BUF_SIZE) {
+											printf("error8\n");
+											client_response_buf_len = BUF_SIZE;
+											client_response_buf[BUF_SIZE] = '\0';
+											// 切换为写事件
+											ev.events = EPOLLOUT;
+											ev.data.fd = fd;
+											if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+												perror("epoll_ctl");
+											}
+											continue;// 跳过后续while(1)中的处理
+
+										}
+										pipeline_requests_ptrr += request_len;
+										// 还没到缓冲区大小限制
+										memcpy(client_response_buf_ptr, not_found, resp_len);
+										client_response_buf_len = resp_len;
+										client_response_buf_ptr += resp_len;
+										continue;// 跳过后续while(1)中的处理
+									
+								}  
+
+								// 打开文件
+								int file_fd = open(full_path, O_RDONLY);
+								if (file_fd == -1) {// 打开失败 返回错误
+									printf("file not found\n"); // 记录日志
+									size_t resp_len = strlen(internal_error);
+										// 将错误响应写入缓冲区
+										// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+										if (client_response_buf_len + resp_len > BUF_SIZE) {
+											printf("error9\n");
+											client_response_buf_len = BUF_SIZE;
+											client_response_buf[BUF_SIZE] = '\0';
+											// 切换为写事件
+											ev.events = EPOLLOUT;
+											ev.data.fd = fd;
+											if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+												perror("epoll_ctl");
+											}
+											continue;// 跳过后续while(1)中的处理
+
+										}
+										pipeline_requests_ptrr += request_len;
+										// 还没到缓冲区大小限制
+										memcpy(client_response_buf_ptr, internal_error, resp_len);
+										client_response_buf_len = resp_len;
+										client_response_buf_ptr += resp_len;
+										continue;// 跳过后续while(1)中的处理
+								}
+
+								
+								// 使用文件描述符获取状态
+								if (fstat(file_fd, &st) == -1) { // 获取失败
+									printf("file not found\n"); // 记录日志
+									size_t resp_len = strlen(internal_error);
+										// 将错误响应写入缓冲区
+										// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+										if (client_response_buf_len + resp_len > BUF_SIZE) {
+											printf("error10\n");
+											client_response_buf_len = BUF_SIZE;
+											client_response_buf[BUF_SIZE] = '\0';
+											// 切换为写事件
+											ev.events = EPOLLOUT;
+											ev.data.fd = fd;
+											if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+												perror("epoll_ctl");
+											}
+											continue;// 跳过后续while(1)中的处理
+
+										}
+										pipeline_requests_ptrr += request_len;
+										// 还没到缓冲区大小限制
+										memcpy(client_response_buf_ptr, internal_error, resp_len);
+										client_response_buf_len = resp_len;
+										client_response_buf_ptr += resp_len;
+										continue;// 跳过后续while(1)中的处理
+								}
+
+								// 动态构造响应头
+								char headers[512];
+								// 获取文件信息
+								const char *mime_type = get_mime_type(full_path);
+								// 获取时间信息
+								char date_buf[64];
+								get_current_time_rfc1123(date_buf, sizeof(date_buf));
+								char last_modified[128];
+								get_file_mod_time_rfc1123(full_path, last_modified, sizeof(last_modified));
+								const char *connection_header = client->keep_alive ? "keep-alive" : "close";
+								int headers_len = snprintf(headers, sizeof(headers),
+									"HTTP/1.1 200 OK\r\n"
+									"Server: liso/1.1\r\n"
+									"Date: %s\r\n"
+									"Content-Type: %s\r\n"
+									"Content-Length: %ld\r\n"
+									"Last-Modified: %s\r\n"
+									"Connection: %s\r\n\r\n",  // 动态设置
+									date_buf,
+									mime_type,
+									st.st_size,
+									last_modified,
+									connection_header);
+								// 处理响应头缓冲区溢出
+								if (headers_len >= (int)sizeof(headers)) {
+									printf("file not found\n"); // 记录日志
+									size_t resp_len = strlen(internal_error);
+										// 将错误响应写入缓冲区
+										// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+										if (client_response_buf_len + resp_len > BUF_SIZE) {
+											printf("error11\n");
+											client_response_buf_len = BUF_SIZE;
+											client_response_buf[BUF_SIZE] = '\0';
+											// 切换为写事件
+											ev.events = EPOLLOUT;
+											ev.data.fd = fd;
+											if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+												perror("epoll_ctl");
+											}
+											continue;// 跳过后续while(1)中的处理
+
+										}
+										pipeline_requests_ptrr += request_len;
+										// 还没到缓冲区大小限制
+										memcpy(client_response_buf_ptr, internal_error, resp_len);
+										client_response_buf_len = resp_len;
+										client_response_buf_ptr += resp_len;
+										continue;// 跳过后续while(1)中的处理
+								}
+								// 填充响应缓冲区
+								memcpy(client_response_buf_ptr, headers, headers_len);
+								client_response_buf_len += headers_len;
+							
+
+								// GET方法需要发送文件内容（HEAD不发送）
+								if (strcmp(method, "GET") == 0) {
+									// 先设置文件状态
+									client->file_fd = file_fd;
+									client->file_offset = 0;
+									client->file_size = st.st_size;
+									client->header_out = 0;
+									
+									// 开始读取
+									ssize_t bytes_read = pread(file_fd, client_response_buf_ptr + headers_len, MIN(BUF_SIZE - headers_len, client->file_size), client->file_offset);
+									if (bytes_read > 0) { // 读取成功 
+										if(client->file_size <= BUF_SIZE - headers_len){// 文件大小比缓冲区大小要小
+											client->buf_len += bytes_read; // 直接加上 然后设置offset为-1 表示已经发送完 在写事件时直接发送即可
+											client->file_offset = -1;
+										}else{// 文件大小比缓冲区大小要大 设置偏移量为读取的大小，并在可写事件时继续发送
+											// 不做处理 等可写时发送
+										}
+									} else if (bytes_read == -1) {// 读取文件失败
+										size_t resp_len = strlen(internal_error);
+										// 将错误响应写入缓冲区
+										// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+										if (client_response_buf_len + resp_len > BUF_SIZE) {
+											printf("error12\n");
+											client_response_buf_len = BUF_SIZE;
+											client_response_buf[BUF_SIZE] = '\0';
+											// 切换为写事件
+											ev.events = EPOLLOUT;
+											ev.data.fd = fd;
+											if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+												perror("epoll_ctl");
+											}
+											continue;// 跳过后续while(1)中的处理
+
+										}
+										pipeline_requests_ptrr += request_len;
+										// 还没到缓冲区大小限制
+										memcpy(client_response_buf_ptr, internal_error, resp_len);
+										client_response_buf_len = resp_len;
+										client_response_buf_ptr += resp_len;
+										continue;// 跳过后续while(1)中的处理
+									}
+								}else{// HEAD 不返回文件
+									client->file_offset = -1;
+								}
+							}else if(strcmp(method, "POST") == 0){// 处理Post请求 直接echo回去
+								// TODO: 
+								size_t req_total_len = request_end - request_start + 4; // 包含\r\n\r\n
+								char header[128];
+								int header_len = snprintf(header, sizeof(header),
+									"HTTP/1.1 200 OK\r\n"
+									"Content-Length: %zd\r\n"
+									"Connection: close\r\n\r\n",  // 简化处理，每次关闭连接
+									req_total_len);
+						
+								// 移动原始请求数据(放在响应头后)
+								memmove(client->buf + header_len, client->buf, req_total_len);
+								// 添加响应头
+								memcpy(client->buf, header, header_len);
+								// 更新缓冲区长度
+								client->buf_len = header_len + req_total_len;
+								
+								
+							}else{// 出错
+								size_t resp_len = strlen(internal_error);
+								// 将错误响应写入缓冲区
+								// 比缓冲区大小大了 直接截断(忽略了当前请求) 然后切换到写事件 发送
+								if (client_response_buf_len + resp_len > BUF_SIZE) {
+									printf("error13\n");
+									client_response_buf_len = BUF_SIZE;
+									client_response_buf[BUF_SIZE] = '\0';
+									// 切换为写事件
+									ev.events = EPOLLOUT;
+									ev.data.fd = fd;
+									if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+										perror("epoll_ctl");
+									}
+									continue;// 跳过后续while(1)中的处理
+
+								}
+								// 还没到缓冲区大小限制
+								pipeline_requests_ptrr += request_len;
+								memcpy(client_response_buf_ptr, internal_error, resp_len);
+								client_response_buf_len = resp_len;
+								client_response_buf_ptr += resp_len;
+								continue;// 跳过后续while(1)中的处理
+							}
+							// 成功后迭代
+							pipeline_requests_ptrr += request_len;
+							free(path); // 释放路径内存
+							continue;
+						
+					}
+					printf("client_response_buf: \n%s\n",client_response_buf);
+					free(pipeline_requests);// 释放内存
+					// 将要写的内容拷贝到缓冲区
+					memcpy(client->buf, client_response_buf, client_response_buf_len);
+					// 切换为写事件
+					ev.events = EPOLLOUT;
+					ev.data.fd = fd;
+					if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+						perror("epoll_ctl");
+					}
+					continue;  // 跳过后续处理
+					
 				}
 				else{ // 只有单个请求 走原本的逻辑处理单个请求即可
 					printf("Single request...\n");
@@ -609,7 +1152,6 @@ void handle_events(){
 							}
 						}else{
 							client->file_offset = -1;
-							close(file_fd);
 						}
 						
 					}else if(strcmp(method, "POST") == 0){// 处理Post请求 直接echo回去

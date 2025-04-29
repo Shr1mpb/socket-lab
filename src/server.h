@@ -22,6 +22,7 @@
 #define MAX_CLIENTS 1024  // 最大客户端数量
 #define MAX_EVENTS 1024 // event_poll最大事件数量
 #define MAX_PIPELINE_REQUESTS 10 // 最大的pipeline请求个数
+#define MAX_REQUEST_SIZE 1024 // 最大单个pipeline请求的大小
 
 char ROOT_DIR[4096];
 static volatile int global_sock = -1;
@@ -35,9 +36,6 @@ typedef struct{
     int port;            // 客户端端口
 	int current_clients;
 	int keep_alive; 	 // 持久连接
-	
-    struct iovec *response_queue;  // 响应队列
-	
 	// 新增文件传输相关字段
     int file_fd;            // 当前传输的文件描述符
     off_t file_offset;      // 当前文件偏移量
